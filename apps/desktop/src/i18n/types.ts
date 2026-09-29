@@ -879,6 +879,7 @@ export interface Translations {
         unlockDescription: string
         unlockOnePasswordDescription: string
         unlockWithOnePasswordApp: string
+        unlockWithPassword: string
         masterPasswordPlaceholder: string
       }
     }
