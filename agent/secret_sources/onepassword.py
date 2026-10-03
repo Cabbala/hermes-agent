@@ -39,6 +39,8 @@ _DEFAULT_TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 _OP_ENV_ALLOWLIST = (
     "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SystemRoot",
     "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "OP_CONFIG_DIR",
+    # Native Linux app authorization needs the desktop session context, not provider credentials.
+    "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY", "USER", "LOGNAME",
     "OP_ACCOUNT", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN",
     # Lets a user skip op's desktop-app integration probe (which can hang with
     # no timeout on a wedged desktop container) and go straight to token auth.
