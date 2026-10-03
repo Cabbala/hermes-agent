@@ -1,8 +1,8 @@
 """1Password Login items as a vault backend (``op`` CLI).
 
 Unlock: ``op signin --raw`` mints a session token for manual account auth.
-Desktop-app integration instead authorizes through 1Password without a token;
-a metadata-only command verifies access before Hermes grants its unlock lease.
+Desktop-app integration instead authorizes through a metadata-only command,
+without manual sign-in or a token, before Hermes grants its unlock lease.
 A configured service-account token skips the prompt entirely (headless).
 List: ``op item list --categories Login --format json`` → title, urls,
 username. Resolve: ``op item get <id> --fields label=password --reveal``.
@@ -80,16 +80,16 @@ class OnePasswordLoginBackend(LoginBackend):
     def unlock(self, master_password: str) -> None:
         """Authorize explicitly, using the app or a password consumed only on stdin."""
         generation = _unlock.begin_unlock(self.name)
-        cmd = [str(self._op()), "signin", "--raw"]
-        if account := str(self.cfg.get("account") or ""):
-            cmd += ["--account", account]
-        proc = run_with_stdin_secret(cmd, env=self._env(None), secret=master_password, timeout=_TIMEOUT, label="op")
-        token = (proc.stdout or "").strip()
-        if proc.returncode != 0:
-            error = _scrub(proc.stderr or "")
-            if master_password:
-                error = error.replace(master_password, "[REDACTED]")
-            raise RuntimeError(f"1Password unlock failed: {error[:200] or 'sign-in was not authorized'}. {_APP_UNLOCK_HINT}")
+        token = ""
+        if master_password:
+            cmd = [str(self._op()), "signin", "--raw"]
+            if account := str(self.cfg.get("account") or ""):
+                cmd += ["--account", account]
+            proc = run_with_stdin_secret(cmd, env=self._env(None), secret=master_password, timeout=_TIMEOUT, label="op")
+            token = (proc.stdout or "").strip()
+            if proc.returncode != 0:
+                error = _scrub(proc.stderr or "").replace(master_password, "[REDACTED]")
+                raise RuntimeError(f"1Password unlock failed: {error[:200] or 'sign-in was not authorized'}. {_APP_UNLOCK_HINT}")
         if not token:
             # Desktop integration deliberately exports no OP_SESSION token. Do not
             # mistake account registration (or `whoami`) for usable authorization.

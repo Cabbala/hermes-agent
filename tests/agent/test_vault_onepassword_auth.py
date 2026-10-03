@@ -7,6 +7,7 @@ argv/stdin/environment boundary executable on Windows as well as POSIX.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,6 +33,9 @@ with (root / "calls.jsonl").open("a") as stream:
                             "stdin": stdin, "account": os.environ.get("OP_ACCOUNT"),
                             "session": os.environ.get("OP_SESSION_example"),
                             "service": os.environ.get("OP_SERVICE_ACCOUNT_TOKEN")}) + "\n")
+if command == "whoami":
+    sys.stderr.write("account is not signed in")
+    sys.exit(1)
 if command == "signin":
     if state.get("signin_failure"):
         sys.stderr.write("authorization denied")
@@ -42,10 +46,15 @@ if command == "signin":
         print("synthetic-session-token")
     sys.exit(0)
 if command == "vault":
+    if state.get("requires_desktop_session"):
+        required = ("DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY", "USER", "LOGNAME")
+        if not all(os.environ.get(key) for key in required) or "OPENROUTER_API_KEY" in os.environ:
+            sys.stderr.write("native desktop authorization context is unavailable")
+            sys.exit(1)
     if state.get("probe_failure"):
         sys.stderr.write("authorization denied")
         sys.exit(1)
-    print("not json" if state.get("invalid_json") else "[]")
+    print("not json" if state.get("invalid_json") else "{}" if state.get("non_array_json") else "[]")
     sys.exit(0)
 if state.get("expired"):
     sys.stderr.write("session expired")
@@ -79,7 +88,7 @@ def _profile(path, secrets=None):
 
 @pytest.fixture
 def fake_op(tmp_path, monkeypatch):
-    for command in ("signin", "vault", "item"):
+    for command in ("signin", "vault", "item", "whoami"):
         (tmp_path / command).write_text(_FAKE_OP, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OP_CONFIG_DIR", str(tmp_path / "op-config"))
@@ -148,9 +157,10 @@ def test_onepassword_authorization_uses_the_existing_profile_lease(fake_op, monk
         assert all(call["session"] == "synthetic-session-token" for call in calls if call["command"] == "item")
 
 
-@pytest.mark.parametrize("failure", ["signin_failure", "probe_failure", "invalid_json", "lock_race", "expired", "dismissed"])
+@pytest.mark.parametrize("failure", ["signin_failure", "probe_failure", "invalid_json", "non_array_json", "lock_race", "expired", "dismissed"])
 def test_onepassword_unproven_or_revoked_app_authorization_stays_locked(fake_op, monkeypatch, failure):
-    state = {"mode": "desktop", failure: failure not in {"lock_race", "expired", "dismissed"}}
+    state = {"mode": "manual" if failure == "signin_failure" else "desktop",
+             failure: failure not in {"lock_race", "expired", "dismissed"}}
     (fake_op / "state.json").write_text(json.dumps(state))
     with _profile(fake_op / "profile-a"):
         backend = _backend()
@@ -172,9 +182,36 @@ def test_onepassword_unproven_or_revoked_app_authorization_stays_locked(fake_op,
                 backend.list_items()
         else:
             with pytest.raises(RuntimeError):
-                backend.unlock("")
+                backend.unlock("synthetic master" if failure == "signin_failure" else "")
         assert not backend.is_unlocked()
         with pytest.raises(UnlockRequired):
             backend.resolve_password("op:demo")
     calls = [json.loads(line) for line in (fake_op / "calls.jsonl").read_text().splitlines()]
     assert all(call["args"][:1] != ["get"] for call in calls), "no login secrets may be read to prove authorization"
+
+
+def test_desktop_access_does_not_require_a_manual_signin_session(fake_op, monkeypatch):
+    """Native access uses desktop context, not manual sessions or unrelated provider credentials."""
+    for key in ("DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY", "USER", "LOGNAME"):
+        monkeypatch.setenv(key, "synthetic-desktop-session")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-unrelated-credential")
+    (fake_op / "state.json").write_text(json.dumps({
+        "mode": "desktop", "signin_failure": True, "requires_desktop_session": True,
+    }))
+    with _profile(fake_op / "profile-a"):
+        backend = _backend()
+        identity = subprocess.run(
+            [sys.executable, "whoami"], env=backend._env(None),
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5,
+        )
+        assert identity.returncode != 0
+        with pytest.raises(UnlockRequired):
+            backend._run("item", "list")
+        backend.unlock("")
+        assert backend.is_unlocked()
+        [item] = _backend().list_items()
+        assert item.id == "op:demo"
+        assert item.origin == "https://example.com"
+        assert "password" not in item.to_dict()
+        calls = [json.loads(line) for line in (fake_op / "calls.jsonl").read_text().splitlines()]
+        assert not any(call["command"] == "item" and call["args"][:1] == ["get"] for call in calls)
